@@ -1,0 +1,23 @@
+{
+  "name": "localchat",
+  "version": "1.0.0",
+  "description": "LocalChat is a real-time local rooms chat app with text, voice, and video using Express, Socket.IO, and WebRTC.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "chat",
+    "webrtc",
+    "socket.io",
+    "express",
+    "voice",
+    "video"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.3",
+    "socket.io": "^4.7.5"
+  }
+}

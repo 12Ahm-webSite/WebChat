@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LocalChat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section id="lobby" class="lobby">
+      <div class="brand">
+        <div class="brand-mark">LC</div>
+        <div>
+          <h1>LocalChat</h1>
+          <p>Private browser rooms for text, voice, and video.</p>
+        </div>
+      </div>
+
+      <form id="lobbyForm" class="lobby-card">
+        <label for="usernameInput">Username</label>
+        <input id="usernameInput" type="text" name="username" placeholder="Enter your name" autocomplete="name" required>
+
+        <label for="roomInput">Room ID</label>
+        <input id="roomInput" type="text" name="room" placeholder="example: team-standup" autocomplete="off" required>
+
+        <div id="lobbyError" class="form-error" aria-live="polite"></div>
+
+        <div class="lobby-actions">
+          <button id="createRoomBtn" type="button">Create Room</button>
+          <button id="joinRoomBtn" type="submit" class="secondary">Join Room</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="roomView" class="room-view hidden">
+      <header class="room-header">
+        <div>
+          <p class="eyebrow">Room</p>
+          <h2 id="roomName">-</h2>
+        </div>
+        <div>
+          <p class="eyebrow">Signed in as</p>
+          <h3 id="currentUsername">-</h3>
+        </div>
+      </header>
+
+      <section class="video-grid" id="videoGrid" aria-label="Video participants">
+        <article class="video-tile local-tile" id="localTile">
+          <video id="localVideo" autoplay muted playsinline></video>
+          <div class="video-label">
+            <div class="video-name">You</div>
+            <div class="video-status"></div>
+          </div>
+        </article>
+      </section>
+
+      <aside class="side-panel">
+        <section class="panel-section">
+          <div class="panel-title-row">
+            <h3>Participants</h3>
+            <span id="participantCount">0</span>
+          </div>
+          <ul id="participantsList" class="participants-list"></ul>
+        </section>
+
+        <section class="panel-section chat-panel">
+          <h3>Chat</h3>
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <form id="chatForm" class="chat-form">
+            <input id="messageInput" type="text" placeholder="Write a message" autocomplete="off">
+            <button type="submit">Send</button>
+          </form>
+        </section>
+      </aside>
+
+      <footer class="controls" aria-label="Call controls">
+        <button id="toggleMicBtn" type="button" class="control-button">Mic</button>
+        <button id="toggleCameraBtn" type="button" class="control-button">Camera</button>
+        <button id="leaveRoomBtn" type="button" class="control-button danger">Leave</button>
+      </footer>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
