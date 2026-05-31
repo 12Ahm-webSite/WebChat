@@ -1,5 +1,7 @@
 const path = require('path');
 const express = require('express');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const http = require('http');
 const { Server } = require('socket.io');
 
@@ -8,13 +10,131 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
+const MAX_ROOM_ID_LENGTH = 40;
+const MAX_USERNAME_LENGTH = 32;
+const MAX_MESSAGE_LENGTH = 1000;
+const MAX_PARTICIPANTS_PER_ROOM = Number(process.env.MAX_PARTICIPANTS_PER_ROOM || 8);
+const SOCKET_WINDOW_MS = 10 * 1000;
+const SOCKET_LIMITS = {
+  join: 8,
+  message: 20,
+  signal: 80,
+  media: 20
+};
 const rooms = new Map();
 
+app.set('trust proxy', 1);
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      mediaSrc: ["'self'", 'blob:'],
+      connectSrc: ["'self'", 'ws:', 'wss:'],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      frameAncestors: ["'none'"]
+    }
+  },
+  crossOriginEmbedderPolicy: false
+}));
+
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  limit: 180,
+  standardHeaders: true,
+  legacyHeaders: false
+}));
+
 app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/api/ice-servers', (req, res) => {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ];
+
+  if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
+    iceServers.push({
+      urls: process.env.TURN_URL,
+      username: process.env.TURN_USERNAME,
+      credential: process.env.TURN_CREDENTIAL
+    });
+  }
+
+  res.json({ iceServers });
+});
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+
+function sanitizeUsername(username) {
+  return String(username || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, MAX_USERNAME_LENGTH);
+}
+
+function sanitizeRoomId(roomId) {
+  return String(roomId || '')
+    .trim()
+    .slice(0, MAX_ROOM_ID_LENGTH);
+}
+
+function sanitizeMessage(message) {
+  return String(message || '')
+    .trim()
+    .slice(0, MAX_MESSAGE_LENGTH);
+}
+
+function isValidRoomId(roomId) {
+  return /^[a-zA-Z0-9_-]{3,40}$/.test(roomId);
+}
+
+function isValidUsername(username) {
+  return username.length >= 2 && username.length <= MAX_USERNAME_LENGTH;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isRateLimited(socket, bucketName, limit) {
+  const now = Date.now();
+  const buckets = socket.data.rateBuckets || {};
+  const bucket = (buckets[bucketName] || []).filter((timestamp) => now - timestamp < SOCKET_WINDOW_MS);
+
+  if (bucket.length >= limit) {
+    buckets[bucketName] = bucket;
+    socket.data.rateBuckets = buckets;
+    return true;
+  }
+
+  bucket.push(now);
+  buckets[bucketName] = bucket;
+  socket.data.rateBuckets = buckets;
+  return false;
+}
+
+function callbackError(callback, error) {
+  if (typeof callback === 'function') {
+    callback({ ok: false, error });
+  }
+}
+
+function canSignalTo(socket, targetSocketId) {
+  const { roomId } = socket.data;
+
+  if (!roomId || !targetSocketId || !rooms.has(roomId)) {
+    return false;
+  }
+
+  return rooms.get(roomId).has(targetSocketId);
+}
 
 function getRoomUsers(roomId) {
   const room = rooms.get(roomId);
@@ -66,17 +186,22 @@ function leaveCurrentRoom(socket) {
 }
 
 io.on('connection', (socket) => {
-  socket.on('join-room', ({ roomId, username }, callback) => {
-    const cleanRoomId = String(roomId || '').trim();
-    const cleanUsername = String(username || '').trim();
+  socket.on('join-room', ({ roomId, username } = {}, callback) => {
+    if (isRateLimited(socket, 'join', SOCKET_LIMITS.join)) {
+      callbackError(callback, 'Too many join attempts. Please wait a moment.');
+      return;
+    }
 
-    if (!cleanRoomId || !cleanUsername) {
-      if (typeof callback === 'function') {
-        callback({
-          ok: false,
-          error: 'Username and Room ID are required.'
-        });
-      }
+    const cleanRoomId = sanitizeRoomId(roomId);
+    const cleanUsername = sanitizeUsername(username);
+
+    if (!isValidUsername(cleanUsername)) {
+      callbackError(callback, 'Username must be 2 to 32 characters.');
+      return;
+    }
+
+    if (!isValidRoomId(cleanRoomId)) {
+      callbackError(callback, 'Room ID must be 3 to 40 letters, numbers, dashes, or underscores.');
       return;
     }
 
@@ -88,6 +213,11 @@ io.on('connection', (socket) => {
 
     const room = rooms.get(cleanRoomId);
     const existingUsers = getRoomUsers(cleanRoomId);
+
+    if (room.size >= MAX_PARTICIPANTS_PER_ROOM) {
+      callbackError(callback, 'This room is full.');
+      return;
+    }
 
     room.set(socket.id, {
       username: cleanUsername,
@@ -124,7 +254,11 @@ io.on('connection', (socket) => {
     emitParticipants(cleanRoomId);
   });
 
-  socket.on('media-state', ({ roomId, micEnabled, cameraEnabled }) => {
+  socket.on('media-state', ({ roomId, micEnabled, cameraEnabled } = {}) => {
+    if (isRateLimited(socket, 'media', SOCKET_LIMITS.media)) {
+      return;
+    }
+
     if (!socket.data.roomId || socket.data.roomId !== roomId || !rooms.has(roomId)) {
       return;
     }
@@ -148,8 +282,12 @@ io.on('connection', (socket) => {
     emitParticipants(roomId);
   });
 
-  socket.on('chat-message', ({ roomId, message }) => {
-    const cleanMessage = String(message || '').trim();
+  socket.on('chat-message', ({ roomId, message } = {}) => {
+    if (isRateLimited(socket, 'message', SOCKET_LIMITS.message)) {
+      return;
+    }
+
+    const cleanMessage = sanitizeMessage(message);
 
     if (!socket.data.roomId || socket.data.roomId !== roomId || !cleanMessage) {
       return;
@@ -164,8 +302,12 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('offer', ({ to, offer }) => {
-    if (!to || !offer) {
+  socket.on('offer', ({ to, offer } = {}) => {
+    if (isRateLimited(socket, 'signal', SOCKET_LIMITS.signal)) {
+      return;
+    }
+
+    if (!canSignalTo(socket, to) || !isPlainObject(offer)) {
       return;
     }
 
@@ -175,8 +317,12 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('answer', ({ to, answer }) => {
-    if (!to || !answer) {
+  socket.on('answer', ({ to, answer } = {}) => {
+    if (isRateLimited(socket, 'signal', SOCKET_LIMITS.signal)) {
+      return;
+    }
+
+    if (!canSignalTo(socket, to) || !isPlainObject(answer)) {
       return;
     }
 
@@ -186,8 +332,12 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('ice-candidate', ({ to, candidate }) => {
-    if (!to || !candidate) {
+  socket.on('ice-candidate', ({ to, candidate } = {}) => {
+    if (isRateLimited(socket, 'signal', SOCKET_LIMITS.signal)) {
+      return;
+    }
+
+    if (!canSignalTo(socket, to) || !isPlainObject(candidate)) {
       return;
     }
 

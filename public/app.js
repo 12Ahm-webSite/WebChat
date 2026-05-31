@@ -32,12 +32,13 @@ let localUserId = null;
 let micEnabled = true;
 let cameraEnabled = true;
 
-const rtcConfiguration = {
+let rtcConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' }
   ]
 };
+let iceServersLoaded = false;
 
 function setLobbyError(message) {
   lobbyError.textContent = message || '';
@@ -52,6 +53,32 @@ function formatTime(isoString) {
     hour: '2-digit',
     minute: '2-digit'
   }).format(new Date(isoString));
+}
+
+async function loadIceServers() {
+  if (iceServersLoaded) {
+    return;
+  }
+
+  try {
+    const response = await fetch('/api/ice-servers');
+
+    if (!response.ok) {
+      throw new Error('Could not load ICE servers.');
+    }
+
+    const data = await response.json();
+
+    if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+      rtcConfiguration = {
+        iceServers: data.iceServers
+      };
+    }
+  } catch (error) {
+    console.warn('Using fallback ICE servers:', error);
+  } finally {
+    iceServersLoaded = true;
+  }
 }
 
 function showRoom() {
@@ -393,6 +420,7 @@ async function joinRoom(roomId, username) {
       throw new Error('This browser does not support camera and microphone access.');
     }
 
+    await loadIceServers();
     await startLocalMedia();
 
     socket.emit('join-room', { roomId, username }, async (response) => {

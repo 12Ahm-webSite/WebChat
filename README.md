@@ -14,6 +14,7 @@ It supports text chat, voice chat, video chat, rooms, participant lists, media s
 - Microphone and camera status indicators for every participant
 - System messages for user join and leave events
 - Responsive dark meeting-style interface
+- Basic production security headers and rate limits
 - No database
 - No Firebase or Supabase
 - No React, Vue, or TypeScript
@@ -22,16 +23,17 @@ It supports text chat, voice chat, video chat, rooms, participant lists, media s
 
 ```text
 project/
-├── public/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-├── server.js
-├── package.json
-├── package-lock.json
-├── .gitignore
-├── LICENSE
-└── README.md
+|-- public/
+|   |-- index.html
+|   |-- style.css
+|   `-- app.js
+|-- server.js
+|-- package.json
+|-- package-lock.json
+|-- .env.example
+|-- .gitignore
+|-- LICENSE
+`-- README.md
 ```
 
 ## Requirements
@@ -60,10 +62,50 @@ http://localhost:3000
 
 To test a room, open the same URL in two browser tabs or two devices on the same network, enter different usernames, and use the same Room ID.
 
+## Render Deployment
+
+Use these settings on Render:
+
+```text
+Build Command: npm install
+Start Command: npm start
+```
+
+Render automatically provides `PORT`, and the server already reads it through `process.env.PORT`.
+
+Recommended environment variables:
+
+```text
+MAX_PARTICIPANTS_PER_ROOM=8
+TURN_URL=turn:your-turn-host:3478
+TURN_USERNAME=your-turn-username
+TURN_CREDENTIAL=your-turn-password
+```
+
+`TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` are optional, but strongly recommended for reliable voice and video between users on different networks.
+
+## Security
+
+The server includes:
+
+- Helmet security headers
+- HTTP rate limiting
+- Socket.IO rate limiting for joins, messages, media state, and WebRTC signaling
+- Room ID validation
+- Username validation
+- Message length limits
+- Maximum participants per room
+- Same-room checks for WebRTC signaling events
+- No database persistence
+- Escaped text rendering in the browser through `textContent`
+
+For public production use, add password-protected rooms, temporary TURN credentials, stronger abuse monitoring, and authentication if private rooms are required.
+
 ## Notes
 
 - Browsers require camera and microphone permission before joining a room.
 - `localhost` works for local development.
+- HTTPS is required for camera and microphone access on public deployments.
 - For real deployment across different networks, add a TURN server. STUN alone is not enough for all NAT/firewall cases.
 - This project stores room state in memory only. Restarting the server clears all active rooms.
 
@@ -76,7 +118,7 @@ To test a room, open the same URL in two browser tabs or two devices on the same
 - Recording
 - PWA support
 - End-to-end encryption
-- TURN server configuration
+- Temporary TURN credentials
 - Better mobile call controls
 - User avatars
 
