@@ -3,6 +3,7 @@ const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const http = require('http');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 
 const app = express();
@@ -23,6 +24,12 @@ const SOCKET_LIMITS = {
 };
 const rooms = new Map();
 
+const PREDEFINED_ROOMS = [
+  { id: 'عامة', name: 'عامة', description: 'للدردشة العامة والنقاشات', icon: '🌐' },
+  { id: 'تقنية', name: 'تقنية', description: 'للمواضيع التقنية والبرمجة', icon: '💻' },
+  { id: 'ترفيه', name: 'ترفيه', description: 'للترفيه والألعاب', icon: '🎮' }
+];
+
 app.set('trust proxy', 1);
 
 app.use(helmet({
@@ -30,7 +37,8 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'"],
-      styleSrc: ["'self'"],
+      styleSrc: ["'self'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       imgSrc: ["'self'", 'data:', 'blob:'],
       mediaSrc: ["'self'", 'blob:'],
       connectSrc: ["'self'", 'ws:', 'wss:'],
@@ -51,13 +59,34 @@ app.use(rateLimit({
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Generate temporary TURN credentials using HMAC-SHA1
+function generateTurnCredentials(secret, ttl) {
+  const timestamp = Math.floor(Date.now() / 1000) + ttl;
+  const username = `${timestamp}:localchat`;
+  const hmac = crypto.createHmac('sha1', secret);
+  hmac.update(username);
+  const credential = hmac.digest('base64');
+  return { username, credential };
+}
+
 app.get('/api/ice-servers', (req, res) => {
   const iceServers = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' }
   ];
 
-  if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
+  // Temporary TURN credentials (preferred)
+  if (process.env.TURN_SECRET && process.env.TURN_URL) {
+    const ttl = 86400; // 24 hours
+    const { username, credential } = generateTurnCredentials(process.env.TURN_SECRET, ttl);
+    iceServers.push({
+      urls: process.env.TURN_URL,
+      username,
+      credential
+    });
+  }
+  // Static TURN credentials (fallback)
+  else if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
     iceServers.push({
       urls: process.env.TURN_URL,
       username: process.env.TURN_USERNAME,
@@ -66,6 +95,21 @@ app.get('/api/ice-servers', (req, res) => {
   }
 
   res.json({ iceServers });
+});
+
+app.get('/api/rooms', (req, res) => {
+  const roomList = PREDEFINED_ROOMS.map((predefined) => {
+    const room = rooms.get(predefined.id);
+    return {
+      id: predefined.id,
+      name: predefined.name,
+      description: predefined.description,
+      icon: predefined.icon,
+      participants: room ? room.users.size : 0,
+      hasPassword: room ? Boolean(room.password) : false
+    };
+  });
+  res.json({ rooms: roomList });
 });
 
 app.get('*', (req, res) => {
@@ -92,7 +136,8 @@ function sanitizeMessage(message) {
 }
 
 function isValidRoomId(roomId) {
-  return /^[a-zA-Z0-9_-]{3,40}$/.test(roomId);
+  // Allow Arabic, Latin, numbers, dashes, underscores (3-40 chars)
+  return /^[\u0600-\u06FFa-zA-Z0-9_-]{2,40}$/.test(roomId);
 }
 
 function isValidUsername(username) {
@@ -133,7 +178,7 @@ function canSignalTo(socket, targetSocketId) {
     return false;
   }
 
-  return rooms.get(roomId).has(targetSocketId);
+  return rooms.get(roomId).users.has(targetSocketId);
 }
 
 function getRoomUsers(roomId) {
@@ -142,7 +187,7 @@ function getRoomUsers(roomId) {
     return [];
   }
 
-  return Array.from(room.entries()).map(([socketId, user]) => ({
+  return Array.from(room.users.entries()).map(([socketId, user]) => ({
     id: socketId,
     username: user.username,
     micEnabled: user.micEnabled,
@@ -162,7 +207,7 @@ function leaveCurrentRoom(socket) {
   }
 
   const room = rooms.get(roomId);
-  room.delete(socket.id);
+  room.users.delete(socket.id);
   socket.leave(roomId);
 
   socket.to(roomId).emit('user-left', {
@@ -171,11 +216,11 @@ function leaveCurrentRoom(socket) {
   });
 
   socket.to(roomId).emit('system-message', {
-    message: `${username} left the room.`,
+    message: `${username} غادر الغرفة.`,
     time: new Date().toISOString()
   });
 
-  if (room.size === 0) {
+  if (room.users.size === 0) {
     rooms.delete(roomId);
   } else {
     emitParticipants(roomId);
@@ -186,40 +231,54 @@ function leaveCurrentRoom(socket) {
 }
 
 io.on('connection', (socket) => {
-  socket.on('join-room', ({ roomId, username } = {}, callback) => {
+  socket.on('join-room', ({ roomId, username, password } = {}, callback) => {
     if (isRateLimited(socket, 'join', SOCKET_LIMITS.join)) {
-      callbackError(callback, 'Too many join attempts. Please wait a moment.');
+      callbackError(callback, 'محاولات كثيرة. انتظر لحظة.');
       return;
     }
 
     const cleanRoomId = sanitizeRoomId(roomId);
     const cleanUsername = sanitizeUsername(username);
+    const cleanPassword = password ? String(password).trim().slice(0, 128) : '';
 
     if (!isValidUsername(cleanUsername)) {
-      callbackError(callback, 'Username must be 2 to 32 characters.');
+      callbackError(callback, 'اسم المستخدم يجب أن يكون من 2 إلى 32 حرف.');
       return;
     }
 
     if (!isValidRoomId(cleanRoomId)) {
-      callbackError(callback, 'Room ID must be 3 to 40 letters, numbers, dashes, or underscores.');
+      callbackError(callback, 'اسم الغرفة غير صالح.');
       return;
     }
 
     leaveCurrentRoom(socket);
 
+    // Check if room exists and validate password
+    if (rooms.has(cleanRoomId)) {
+      const existingRoom = rooms.get(cleanRoomId);
+      if (existingRoom.password && existingRoom.password !== cleanPassword) {
+        callbackError(callback, 'كلمة المرور غير صحيحة.');
+        return;
+      }
+    }
+
     if (!rooms.has(cleanRoomId)) {
-      rooms.set(cleanRoomId, new Map());
+      rooms.set(cleanRoomId, {
+        users: new Map(),
+        password: cleanPassword || null,
+        createdAt: Date.now()
+      });
     }
 
     const room = rooms.get(cleanRoomId);
     const existingUsers = getRoomUsers(cleanRoomId);
 
-    if (room.size >= MAX_PARTICIPANTS_PER_ROOM) {
-      callbackError(callback, 'This room is full.');
+    if (room.users.size >= MAX_PARTICIPANTS_PER_ROOM) {
+      callbackError(callback, 'الغرفة ممتلئة.');
       return;
     }
 
-    room.set(socket.id, {
+    room.users.set(socket.id, {
       username: cleanUsername,
       micEnabled: true,
       cameraEnabled: true,
@@ -247,11 +306,33 @@ io.on('connection', (socket) => {
     });
 
     io.to(cleanRoomId).emit('system-message', {
-      message: `${cleanUsername} joined the room.`,
+      message: `${cleanUsername} انضم للغرفة.`,
       time: new Date().toISOString()
     });
 
     emitParticipants(cleanRoomId);
+  });
+
+  // E2E key exchange: broadcast public key to room
+  socket.on('public-key', ({ roomId, publicKey } = {}) => {
+    if (!socket.data.roomId || socket.data.roomId !== roomId) {
+      return;
+    }
+    socket.to(roomId).emit('public-key', {
+      userId: socket.id,
+      publicKey
+    });
+  });
+
+  // E2E key exchange: forward encrypted shared key
+  socket.on('key-exchange', ({ to, encryptedKey } = {}) => {
+    if (!socket.data.roomId || !canSignalTo(socket, to)) {
+      return;
+    }
+    socket.to(to).emit('key-exchange', {
+      from: socket.id,
+      encryptedKey
+    });
   });
 
   socket.on('media-state', ({ roomId, micEnabled, cameraEnabled } = {}) => {
@@ -264,7 +345,7 @@ io.on('connection', (socket) => {
     }
 
     const room = rooms.get(roomId);
-    const user = room.get(socket.id);
+    const user = room.users.get(socket.id);
 
     if (!user) {
       return;
@@ -282,12 +363,12 @@ io.on('connection', (socket) => {
     emitParticipants(roomId);
   });
 
-  socket.on('chat-message', ({ roomId, message } = {}) => {
+  socket.on('chat-message', ({ roomId, message, encrypted, iv } = {}) => {
     if (isRateLimited(socket, 'message', SOCKET_LIMITS.message)) {
       return;
     }
 
-    const cleanMessage = sanitizeMessage(message);
+    const cleanMessage = encrypted ? message : sanitizeMessage(message);
 
     if (!socket.data.roomId || socket.data.roomId !== roomId || !cleanMessage) {
       return;
@@ -298,6 +379,8 @@ io.on('connection', (socket) => {
       userId: socket.id,
       username: socket.data.username,
       message: cleanMessage,
+      encrypted: Boolean(encrypted),
+      iv: iv || null,
       time: new Date().toISOString()
     });
   });
