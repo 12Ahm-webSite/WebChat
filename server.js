@@ -104,6 +104,41 @@ app.get('/api/ice-servers', (req, res) => {
     });
   }
 
+  // Free public TURN servers as last-resort fallback
+  // These ensure WebRTC works across different networks even without a custom TURN config
+  const hasTurn = iceServers.some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => String(url).startsWith('turn:') || String(url).startsWith('turns:'));
+  });
+
+  if (!hasTurn) {
+    // OpenRelay free TURN servers (metered.ca public project)
+    iceServers.push(
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turns:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    );
+    console.log('ℹ️  No TURN server configured — using free public relay (OpenRelay).');
+    console.log('   For better performance, set TURN_URLS and TURN_SECRET in .env');
+  }
+
   res.json({
     iceServers,
     turnConfigured: iceServers.some((server) => {

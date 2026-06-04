@@ -593,11 +593,37 @@ function getOrCreatePeerConnection(userId, username) {
   };
 
   peerConnection.ontrack = (event) => {
-    event.streams[0].getTracks().forEach((track) => {
-      if (!remoteStream.getTrackById(track.id)) {
-        remoteStream.addTrack(track);
+    if (event.streams && event.streams[0]) {
+      event.streams[0].getTracks().forEach((track) => {
+        if (!remoteStream.getTrackById(track.id)) {
+          remoteStream.addTrack(track);
+        }
+      });
+    } else {
+      // Fallback: add track directly (common with TURN relay)
+      if (!remoteStream.getTrackById(event.track.id)) {
+        remoteStream.addTrack(event.track);
       }
-    });
+    }
+    // Ensure video element is playing
+    const videoEl = document.querySelector(`#remote-${userId} video`);
+    if (videoEl && videoEl.paused) {
+      videoEl.play().catch(() => {});
+    }
+  };
+
+  peerConnection.oniceconnectionstatechange = () => {
+    const state = peerConnection.iceConnectionState;
+    console.log(`ICE state [${userId}]: ${state}`);
+    if (state === 'failed') {
+      // Attempt ICE restart
+      console.log(`Attempting ICE restart for ${userId}`);
+      peerConnection.createOffer({ iceRestart: true }).then((offer) => {
+        return peerConnection.setLocalDescription(offer);
+      }).then(() => {
+        socket.emit('offer', { to: userId, offer: peerConnection.localDescription });
+      }).catch((err) => console.error('ICE restart failed:', err));
+    }
   };
 
   peerConnection.onconnectionstatechange = () => {
