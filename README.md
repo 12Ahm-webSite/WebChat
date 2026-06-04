@@ -13,7 +13,9 @@ It supports text chat, voice chat, video chat, rooms, participant lists, media s
 - Participant list
 - Microphone and camera status indicators for every participant
 - System messages for user join and leave events
+- Optional password-protected rooms
 - Responsive dark meeting-style interface
+- PWA manifest and service worker
 - Basic production security headers and rate limits
 - No database
 - No Firebase or Supabase
@@ -26,7 +28,10 @@ project/
 |-- public/
 |   |-- index.html
 |   |-- style.css
-|   `-- app.js
+|   |-- app.js
+|   |-- manifest.json
+|   |-- sw.js
+|   `-- icon.svg
 |-- server.js
 |-- package.json
 |-- package-lock.json
@@ -78,11 +83,12 @@ Recommended environment variables:
 ```text
 MAX_PARTICIPANTS_PER_ROOM=8
 TURN_URL=turn:your-turn-host:3478
+TURN_SECRET=your-turn-rest-secret
 TURN_USERNAME=your-turn-username
 TURN_CREDENTIAL=your-turn-password
 ```
 
-`TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` are optional, but strongly recommended for reliable voice and video between users on different networks.
+`TURN_URL` with `TURN_SECRET` is preferred for temporary TURN credentials. `TURN_USERNAME` and `TURN_CREDENTIAL` are supported as a static fallback. TURN is optional, but strongly recommended for reliable voice and video between users on different networks.
 
 ## Security
 
@@ -95,11 +101,12 @@ The server includes:
 - Username validation
 - Message length limits
 - Maximum participants per room
+- Optional room passwords stored as salted PBKDF2 hashes in server memory
 - Same-room checks for WebRTC signaling events
 - No database persistence
 - Escaped text rendering in the browser through `textContent`
 
-For public production use, add password-protected rooms, temporary TURN credentials, stronger abuse monitoring, and authentication if private rooms are required.
+For public production use, prefer temporary TURN credentials, add stronger abuse monitoring, and add user authentication if private rooms require identity.
 
 ## Notes
 

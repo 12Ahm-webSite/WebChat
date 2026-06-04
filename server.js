@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 3000;
 const MAX_ROOM_ID_LENGTH = 40;
 const MAX_USERNAME_LENGTH = 32;
 const MAX_MESSAGE_LENGTH = 1000;
+const MAX_ROOM_PASSWORD_LENGTH = 128;
 const MAX_PARTICIPANTS_PER_ROOM = Number(process.env.MAX_PARTICIPANTS_PER_ROOM || 8);
 const SOCKET_WINDOW_MS = 10 * 1000;
 const SOCKET_LIMITS = {
@@ -106,7 +107,7 @@ app.get('/api/rooms', (req, res) => {
       description: predefined.description,
       icon: predefined.icon,
       participants: room ? room.users.size : 0,
-      hasPassword: room ? Boolean(room.password) : false
+      hasPassword: room ? Boolean(room.passwordRecord) : false
     };
   });
   res.json({ rooms: roomList });
@@ -133,6 +134,41 @@ function sanitizeMessage(message) {
   return String(message || '')
     .trim()
     .slice(0, MAX_MESSAGE_LENGTH);
+}
+
+function sanitizePassword(password) {
+  return String(password || '')
+    .trim()
+    .slice(0, MAX_ROOM_PASSWORD_LENGTH);
+}
+
+function createPasswordRecord(password) {
+  if (!password) {
+    return null;
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256').toString('hex');
+  return { salt, hash };
+}
+
+function verifyPassword(password, passwordRecord) {
+  if (!passwordRecord) {
+    return true;
+  }
+
+  if (!password) {
+    return false;
+  }
+
+  const hash = crypto.pbkdf2Sync(password, passwordRecord.salt, 100000, 32, 'sha256');
+  const storedHash = Buffer.from(passwordRecord.hash, 'hex');
+
+  if (hash.length !== storedHash.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(hash, storedHash);
 }
 
 function isValidRoomId(roomId) {
@@ -239,7 +275,7 @@ io.on('connection', (socket) => {
 
     const cleanRoomId = sanitizeRoomId(roomId);
     const cleanUsername = sanitizeUsername(username);
-    const cleanPassword = password ? String(password).trim().slice(0, 128) : '';
+    const cleanPassword = sanitizePassword(password);
 
     if (!isValidUsername(cleanUsername)) {
       callbackError(callback, 'اسم المستخدم يجب أن يكون من 2 إلى 32 حرف.');
@@ -256,7 +292,7 @@ io.on('connection', (socket) => {
     // Check if room exists and validate password
     if (rooms.has(cleanRoomId)) {
       const existingRoom = rooms.get(cleanRoomId);
-      if (existingRoom.password && existingRoom.password !== cleanPassword) {
+      if (!verifyPassword(cleanPassword, existingRoom.passwordRecord)) {
         callbackError(callback, 'كلمة المرور غير صحيحة.');
         return;
       }
@@ -265,7 +301,7 @@ io.on('connection', (socket) => {
     if (!rooms.has(cleanRoomId)) {
       rooms.set(cleanRoomId, {
         users: new Map(),
-        password: cleanPassword || null,
+        passwordRecord: createPasswordRecord(cleanPassword),
         createdAt: Date.now()
       });
     }
