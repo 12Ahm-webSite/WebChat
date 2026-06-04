@@ -82,13 +82,29 @@ Recommended environment variables:
 
 ```text
 MAX_PARTICIPANTS_PER_ROOM=8
-TURN_URL=turn:your-turn-host:3478
+TURN_URLS=turn:your-turn-host:3478,turn:your-turn-host:3478?transport=tcp,turns:your-turn-host:443?transport=tcp
 TURN_SECRET=your-turn-rest-secret
 TURN_USERNAME=your-turn-username
 TURN_CREDENTIAL=your-turn-password
 ```
 
-`TURN_URL` with `TURN_SECRET` is preferred for temporary TURN credentials. `TURN_USERNAME` and `TURN_CREDENTIAL` are supported as a static fallback. TURN is optional, but strongly recommended for reliable voice and video between users on different networks.
+`TURN_URLS` with `TURN_SECRET` is preferred for temporary TURN credentials. `TURN_URL` is also supported for a single URL. `TURN_USERNAME` and `TURN_CREDENTIAL` are supported as a static fallback. TURN is optional for same-network testing, but strongly recommended for reliable voice and video between users on different networks.
+
+To confirm TURN is active after deployment, open:
+
+```text
+https://your-render-app.onrender.com/api/ice-servers
+```
+
+The response should include:
+
+```json
+{
+  "turnConfigured": true
+}
+```
+
+If it returns `false`, users may enter the same room successfully while voice/video fails across different networks.
 
 ## Security
 

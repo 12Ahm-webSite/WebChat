@@ -70,32 +70,47 @@ function generateTurnCredentials(secret, ttl) {
   return { username, credential };
 }
 
+function getTurnUrls() {
+  const rawUrls = process.env.TURN_URLS || process.env.TURN_URL || '';
+  return rawUrls
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
 app.get('/api/ice-servers', (req, res) => {
+  const turnUrls = getTurnUrls();
   const iceServers = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' }
   ];
 
   // Temporary TURN credentials (preferred)
-  if (process.env.TURN_SECRET && process.env.TURN_URL) {
+  if (process.env.TURN_SECRET && turnUrls.length > 0) {
     const ttl = 86400; // 24 hours
     const { username, credential } = generateTurnCredentials(process.env.TURN_SECRET, ttl);
     iceServers.push({
-      urls: process.env.TURN_URL,
+      urls: turnUrls,
       username,
       credential
     });
   }
   // Static TURN credentials (fallback)
-  else if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
+  else if (turnUrls.length > 0 && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
     iceServers.push({
-      urls: process.env.TURN_URL,
+      urls: turnUrls,
       username: process.env.TURN_USERNAME,
       credential: process.env.TURN_CREDENTIAL
     });
   }
 
-  res.json({ iceServers });
+  res.json({
+    iceServers,
+    turnConfigured: iceServers.some((server) => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      return urls.some((url) => String(url).startsWith('turn:') || String(url).startsWith('turns:'));
+    })
+  });
 });
 
 app.get('/api/rooms', (req, res) => {
