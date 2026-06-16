@@ -48,6 +48,7 @@ let selectedRoomIcon = '🌐';
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
+let audioBlocked = false;
 
 // E2E Encryption state
 let localKeyPair = null;
@@ -129,6 +130,41 @@ function playMessageSound() {
   if (document.hasFocus()) return;
   playTone(1200, 0.08, 'sine', 0.04);
   setTimeout(() => playTone(1500, 0.1, 'sine', 0.04), 80);
+}
+
+/* ===== Audio Unlock for Autoplay Policy ===== */
+function tryUnmuteRemoteVideos() {
+  document.querySelectorAll('#videoGrid video').forEach((v) => {
+    if (v.id !== 'localVideo' && v.muted) {
+      v.muted = false;
+      if (v.paused) v.play().catch(() => {});
+    }
+  });
+  try {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') ctx.resume();
+  } catch (e) {
+    // Audio context not available
+  }
+  hideAudioPrompt();
+  audioBlocked = false;
+}
+
+function showAudioPrompt() {
+  if (document.getElementById('audioPrompt')) return;
+  const prompt = document.createElement('div');
+  prompt.id = 'audioPrompt';
+  prompt.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;padding:12px 28px;border-radius:14px;cursor:pointer;z-index:9999;display:flex;align-items:center;gap:10px;font-size:0.95rem;font-weight:600;box-shadow:0 4px 24px rgba(239,68,68,0.45);font-family:Inter,sans-serif;direction:rtl;transition:transform 0.2s ease';
+  prompt.innerHTML = '🔇 اضغط هنا لتفعيل الصوت';
+  prompt.addEventListener('mouseenter', () => { prompt.style.transform = 'translateX(-50%) scale(1.05)'; });
+  prompt.addEventListener('mouseleave', () => { prompt.style.transform = 'translateX(-50%) scale(1)'; });
+  prompt.addEventListener('click', tryUnmuteRemoteVideos);
+  document.body.appendChild(prompt);
+}
+
+function hideAudioPrompt() {
+  const el = document.getElementById('audioPrompt');
+  if (el) el.remove();
 }
 
 /* ===== E2E Encryption ===== */
@@ -297,6 +333,15 @@ function showRoom() {
   headerAvatar.textContent = getInitial(localUsername);
   headerAvatar.style.background = getAvatarColor(localUsername);
   updateVideoTileStatus(localUserId, localUsername, micEnabled, cameraEnabled);
+
+  // Unlock audio on first interaction in the room view
+  const handleInteraction = () => {
+    if (audioBlocked) tryUnmuteRemoteVideos();
+    roomView.removeEventListener('click', handleInteraction);
+    roomView.removeEventListener('touchstart', handleInteraction);
+  };
+  roomView.addEventListener('click', handleInteraction);
+  roomView.addEventListener('touchstart', handleInteraction);
 }
 
 function showLobby() {
@@ -535,6 +580,7 @@ function createRemoteVideo(userId, username) {
   const video = document.createElement('video');
   video.autoplay = true;
   video.playsInline = true;
+  video.volume = 1.0;
 
   const overlay = document.createElement('div');
   const name = document.createElement('div');
@@ -593,6 +639,7 @@ function getOrCreatePeerConnection(userId, username) {
   };
 
   peerConnection.ontrack = (event) => {
+    console.log(`[WebRTC] Track received from ${userId}: ${event.track.kind}`);
     if (event.streams && event.streams[0]) {
       event.streams[0].getTracks().forEach((track) => {
         if (!remoteStream.getTrackById(track.id)) {
@@ -605,10 +652,23 @@ function getOrCreatePeerConnection(userId, username) {
         remoteStream.addTrack(event.track);
       }
     }
-    // Ensure video element is playing
+    // Ensure video element is playing with audio
     const videoEl = document.querySelector(`#remote-${userId} video`);
-    if (videoEl && videoEl.paused) {
-      videoEl.play().catch(() => {});
+    if (videoEl) {
+      const playPromise = videoEl.play();
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          console.log(`[Audio] Playing with audio for ${userId}`);
+        }).catch(() => {
+          // Autoplay with audio blocked by browser policy — play muted as fallback
+          console.warn(`[Audio] Autoplay blocked for ${userId}, falling back to muted`);
+          videoEl.muted = true;
+          videoEl.play().then(() => {
+            audioBlocked = true;
+            showAudioPrompt();
+          }).catch(() => {});
+        });
+      }
     }
   };
 
@@ -688,6 +748,14 @@ async function handleIceCandidate({ from, candidate }) {
 async function joinRoom(roomId, username, password) {
   setLobbyError('');
   joinRoomBtn.disabled = true;
+
+  // Warm up AudioContext during user gesture for better autoplay support
+  try {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') ctx.resume();
+  } catch (e) {
+    // Audio context not available
+  }
 
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -801,6 +869,8 @@ function cleanupRoom() {
   sharedKeys.clear();
   roomKey = null;
   localKeyPair = null;
+  audioBlocked = false;
+  hideAudioPrompt();
 
   document.querySelectorAll('[id^="remote-"]').forEach((tile) => tile.remove());
 
