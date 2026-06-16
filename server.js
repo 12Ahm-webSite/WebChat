@@ -8,7 +8,7 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { maxHttpBufferSize: 2e7 });
 
 const PORT = process.env.PORT || 3000;
 const MAX_ROOM_ID_LENGTH = 40;
@@ -181,9 +181,12 @@ function sanitizeRoomId(roomId) {
 }
 
 function sanitizeMessage(message) {
-  return String(message || '')
-    .trim()
-    .slice(0, MAX_MESSAGE_LENGTH);
+  const msgStr = String(message || '').trim();
+  if (msgStr.startsWith('data:image/')) {
+    // For base64 images, allow up to 15MB
+    return msgStr.slice(0, 15 * 1024 * 1024);
+  }
+  return msgStr.slice(0, MAX_MESSAGE_LENGTH);
 }
 
 function sanitizePassword(password) {
@@ -454,9 +457,21 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const cleanMessage = encrypted ? message : sanitizeMessage(message);
+    if (!socket.data.roomId || socket.data.roomId !== roomId || !message) {
+      return;
+    }
 
-    if (!socket.data.roomId || socket.data.roomId !== roomId || !cleanMessage) {
+    let cleanMessage;
+    if (encrypted) {
+      if (!Array.isArray(message) || message.length > 15 * 1024 * 1024) {
+        return;
+      }
+      cleanMessage = message;
+    } else {
+      cleanMessage = sanitizeMessage(message);
+    }
+
+    if (!cleanMessage) {
       return;
     }
 
@@ -468,6 +483,17 @@ io.on('connection', (socket) => {
       encrypted: Boolean(encrypted),
       iv: iv || null,
       time: new Date().toISOString()
+    });
+  });
+
+  socket.on('image-saved', ({ roomId, messageId, senderId } = {}) => {
+    if (!socket.data.roomId || socket.data.roomId !== roomId || !senderId || !messageId) {
+      return;
+    }
+    // Notify the sender that the recipient saved the image
+    io.to(senderId).emit('image-saved-notify', {
+      messageId,
+      receiverName: socket.data.username
     });
   });
 

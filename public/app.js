@@ -1,5 +1,30 @@
 const socket = io();
 
+/* ===== Theme Toggle Logic ===== */
+const themeToggleBtn = document.getElementById('themeToggleBtn');
+const themeIconDark = themeToggleBtn.querySelector('.theme-icon-dark');
+const themeIconLight = themeToggleBtn.querySelector('.theme-icon-light');
+
+let currentTheme = localStorage.getItem('theme') || 'dark';
+applyTheme(currentTheme);
+
+themeToggleBtn.addEventListener('click', () => {
+  currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  applyTheme(currentTheme);
+  localStorage.setItem('theme', currentTheme);
+});
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  if (theme === 'dark') {
+    themeIconDark.classList.remove('hidden');
+    themeIconLight.classList.add('hidden');
+  } else {
+    themeIconDark.classList.add('hidden');
+    themeIconLight.classList.remove('hidden');
+  }
+}
+
 /* ===== DOM Elements ===== */
 const lobby = document.getElementById('lobby');
 const roomView = document.getElementById('roomView');
@@ -28,6 +53,19 @@ const toggleRecordBtn = document.getElementById('toggleRecordBtn');
 const recordDot = document.getElementById('recordDot');
 const leaveRoomBtn = document.getElementById('leaveRoomBtn');
 const joinRoomBtn = document.getElementById('joinRoomBtn');
+
+const imageBtn = document.getElementById('imageBtn');
+const imageFileInput = document.getElementById('imageFileInput');
+const imagePreviewModal = document.getElementById('imagePreviewModal');
+const previewModalClose = document.getElementById('previewModalClose');
+const previewModalImg = document.getElementById('previewModalImg');
+const originalQualityCheckbox = document.getElementById('originalQualityCheckbox');
+const sendImageBtn = document.getElementById('sendImageBtn');
+const cancelImageBtn = document.getElementById('cancelImageBtn');
+
+const imageLightbox = document.getElementById('imageLightbox');
+const lightboxImg = document.getElementById('lightboxImg');
+const lightboxClose = document.querySelector('.lightbox-close');
 
 /* ===== State ===== */
 const peerConnections = new Map();
@@ -252,6 +290,112 @@ function formatTime(isoString) {
   }).format(new Date(isoString));
 }
 
+/* ===== Image processing & Lightbox & Toast Helpers ===== */
+function compressImage(file, maxWidth = 1000, maxHeight = 1000, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target.result;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width = Math.round((width * maxHeight) / height);
+            height = maxHeight;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(dataUrl);
+      };
+      img.onerror = (err) => reject(err);
+    };
+    reader.onerror = (err) => reject(err);
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = (error) => reject(error);
+  });
+}
+
+function showToast(message) {
+  let container = document.getElementById('toastContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toastContainer';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.innerHTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4L12 14.01l-3-3"/></svg>
+    <span>${message}</span>
+  `;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.remove();
+    if (container.children.length === 0) {
+      container.remove();
+    }
+  }, 4300);
+}
+
+function openLightbox(src) {
+  lightboxImg.src = src;
+  imageLightbox.classList.add('active');
+  imageLightbox.setAttribute('aria-hidden', 'false');
+}
+
+function closeLightbox() {
+  imageLightbox.classList.remove('active');
+  imageLightbox.setAttribute('aria-hidden', 'true');
+  lightboxImg.src = '';
+}
+
+let tempImageFile = null;
+
+function openPreviewModal(file) {
+  tempImageFile = file;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    previewModalImg.src = e.target.result;
+    originalQualityCheckbox.checked = false;
+    imagePreviewModal.classList.add('active');
+    imagePreviewModal.setAttribute('aria-hidden', 'false');
+  };
+  reader.readAsDataURL(file);
+}
+
+function closePreviewModal() {
+  imagePreviewModal.classList.remove('active');
+  imagePreviewModal.setAttribute('aria-hidden', 'true');
+  previewModalImg.src = '';
+  tempImageFile = null;
+  imageFileInput.value = '';
+}
+
 async function loadIceServers() {
   if (iceServersLoaded) return;
   try {
@@ -403,7 +547,7 @@ function addSystemMessage({ message, time }) {
   messages.scrollTop = messages.scrollHeight;
 }
 
-async function addMessage({ userId, username, message, time, encrypted, iv }) {
+async function addMessage({ id, userId, username, message, time, encrypted, iv }) {
   const item = document.createElement('article');
   const meta = document.createElement('div');
   const author = document.createElement('strong');
@@ -417,29 +561,90 @@ async function addMessage({ userId, username, message, time, encrypted, iv }) {
   author.textContent = username;
   timestamp.textContent = formatTime(time);
 
-  // Decrypt if E2E encrypted
+  let textContent = '';
   if (encrypted && iv) {
     let decryptedText = null;
-
     if (userId === localUserId) {
-      // Our own message — we have the original text (it's already encrypted on send)
-      // Try to decrypt with room key
       if (roomKey) {
         decryptedText = await decryptMessage(message, iv, roomKey);
       }
     } else if (roomKey) {
       decryptedText = await decryptMessage(message, iv, roomKey);
     }
-
-    text.textContent = decryptedText || '[رسالة مشفرة]';
-
-    const lockBadge = document.createElement('span');
-    lockBadge.className = 'message-encrypted';
-    lockBadge.textContent = '🔒';
-    meta.append(author, lockBadge, timestamp);
+    textContent = decryptedText || '[رسالة مشفرة]';
   } else {
-    text.textContent = message;
-    meta.append(author, timestamp);
+    textContent = message;
+  }
+
+  const isImage = typeof textContent === 'string' && textContent.startsWith('data:image/');
+
+  if (isImage) {
+    const container = document.createElement('div');
+    container.className = 'chat-image-container';
+
+    const img = document.createElement('img');
+    img.src = textContent;
+    img.alt = 'صورة مرسلة';
+    img.className = 'chat-image';
+    img.loading = 'lazy';
+    img.addEventListener('click', () => openLightbox(textContent));
+
+    const actions = document.createElement('div');
+    actions.className = 'image-actions';
+
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'image-action-btn';
+    downloadBtn.type = 'button';
+    downloadBtn.title = 'تنزيل الصورة';
+    downloadBtn.innerHTML = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    `;
+
+    downloadBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const link = document.createElement('a');
+      link.href = textContent;
+      let ext = 'jpg';
+      const match = textContent.match(/^data:image\/(\w+);base64,/);
+      if (match) {
+        ext = match[1];
+      }
+      link.download = `LocalChat_${Date.now()}.${ext}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      if (userId !== localUserId && id) {
+        socket.emit('image-saved', {
+          roomId: currentRoomId,
+          messageId: id,
+          senderId: userId
+        });
+      }
+    });
+
+    actions.appendChild(downloadBtn);
+    container.append(img, actions);
+    text.appendChild(container);
+
+    if (encrypted && iv) {
+      const lockBadge = document.createElement('span');
+      lockBadge.className = 'message-encrypted';
+      lockBadge.textContent = '🔒';
+      meta.append(author, lockBadge, timestamp);
+    } else {
+      meta.append(author, timestamp);
+    }
+  } else {
+    text.textContent = textContent;
+    if (encrypted && iv) {
+      const lockBadge = document.createElement('span');
+      lockBadge.className = 'message-encrypted';
+      lockBadge.textContent = '🔒';
+      meta.append(author, lockBadge, timestamp);
+    } else {
+      meta.append(author, timestamp);
+    }
   }
 
   item.append(meta, text);
@@ -956,6 +1161,90 @@ chatForm.addEventListener('submit', async (event) => {
   messageInput.focus();
 });
 
+// Image button click trigger
+imageBtn.addEventListener('click', () => {
+  imageFileInput.click();
+});
+
+// File input selection handler
+imageFileInput.addEventListener('change', (event) => {
+  const file = event.target.files[0];
+  if (file && file.type.startsWith('image/')) {
+    openPreviewModal(file);
+  }
+});
+
+// Paste from Clipboard event handler
+document.addEventListener('paste', (event) => {
+  if (!currentRoomId) return;
+  
+  const items = (event.clipboardData || event.originalEvent.clipboardData).items;
+  for (const item of items) {
+    if (item.type.indexOf('image') === 0) {
+      const file = item.getAsFile();
+      if (file) {
+        event.preventDefault();
+        openPreviewModal(file);
+        break;
+      }
+    }
+  }
+});
+
+// Preview modal actions
+previewModalClose.addEventListener('click', closePreviewModal);
+cancelImageBtn.addEventListener('click', closePreviewModal);
+
+sendImageBtn.addEventListener('click', async () => {
+  if (!tempImageFile || !currentRoomId) return;
+
+  const originalQuality = originalQualityCheckbox.checked;
+  const originalFile = tempImageFile;
+  
+  closePreviewModal();
+
+  try {
+    let base64Data;
+    if (originalQuality) {
+      base64Data = await fileToBase64(originalFile);
+    } else {
+      base64Data = await compressImage(originalFile, 1000, 1000, 0.7);
+    }
+
+    if (roomKey) {
+      try {
+        const { encrypted, iv } = await encryptMessage(base64Data, roomKey);
+        socket.emit('chat-message', {
+          roomId: currentRoomId,
+          message: encrypted,
+          encrypted: true,
+          iv
+        });
+      } catch (e) {
+        socket.emit('chat-message', { roomId: currentRoomId, message: base64Data });
+      }
+    } else {
+      socket.emit('chat-message', { roomId: currentRoomId, message: base64Data });
+    }
+  } catch (err) {
+    console.error('Failed to send image:', err);
+    alert('حدث خطأ أثناء إرسال الصورة.');
+  }
+});
+
+// Lightbox modal actions
+lightboxClose.addEventListener('click', closeLightbox);
+imageLightbox.addEventListener('click', (e) => {
+  if (e.target === imageLightbox) {
+    closeLightbox();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && imageLightbox.classList.contains('active')) {
+    closeLightbox();
+  }
+});
+
 toggleMicBtn.addEventListener('click', () => {
   if (!localStream) return;
   micEnabled = !micEnabled;
@@ -1036,6 +1325,9 @@ socket.on('user-left', ({ userId }) => {
 
 socket.on('chat-message', (data) => addMessage(data));
 socket.on('system-message', addSystemMessage);
+socket.on('image-saved-notify', ({ messageId, receiverName }) => {
+  showToast(`قام ${receiverName} بحفظ صورتك`);
+});
 
 socket.on('media-state', ({ userId, micEnabled: userMicEnabled, cameraEnabled: userCameraEnabled }) => {
   updateParticipantState(userId, {
