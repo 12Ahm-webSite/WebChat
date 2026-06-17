@@ -78,10 +78,9 @@ function getTurnUrls() {
     .filter(Boolean);
 }
 
-app.get('/api/ice-servers', (req, res) => {
+app.get('/api/ice-servers', async (req, res) => {
   const turnUrls = getTurnUrls();
   const iceServers = [
-    // Multiple STUN servers for reliability
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
@@ -89,17 +88,34 @@ app.get('/api/ice-servers', (req, res) => {
     { urls: 'stun:stun4.l.google.com:19302' }
   ];
 
-  // Temporary TURN credentials (preferred)
-  if (process.env.TURN_SECRET && turnUrls.length > 0) {
-    const ttl = 86400; // 24 hours
-    const { username, credential } = generateTurnCredentials(process.env.TURN_SECRET, ttl);
-    iceServers.push({
-      urls: turnUrls,
-      username,
-      credential
-    });
+  // --- Option 1: Metered.ca API (recommended free tier) ---
+  const meteredApiKey = process.env.METERED_API_KEY;
+  if (meteredApiKey) {
+    try {
+      const meteredRes = await fetch(
+        `https://localchat.metered.live/api/v1/turn/credentials?apiKey=${meteredApiKey}`
+      );
+      if (meteredRes.ok) {
+        const turnServers = await meteredRes.json();
+        if (Array.isArray(turnServers) && turnServers.length > 0) {
+          iceServers.push(...turnServers);
+          console.log(`✅ Loaded ${turnServers.length} TURN servers from Metered.ca`);
+        }
+      } else {
+        console.warn('⚠️  Metered.ca API returned:', meteredRes.status);
+      }
+    } catch (err) {
+      console.warn('⚠️  Failed to fetch Metered.ca TURN credentials:', err.message);
+    }
   }
-  // Static TURN credentials (fallback)
+
+  // --- Option 2: Custom TURN with REST/HMAC auth ---
+  if (process.env.TURN_SECRET && turnUrls.length > 0) {
+    const ttl = 86400;
+    const { username, credential } = generateTurnCredentials(process.env.TURN_SECRET, ttl);
+    iceServers.push({ urls: turnUrls, username, credential });
+  }
+  // --- Option 3: Custom TURN with static credentials ---
   else if (turnUrls.length > 0 && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
     iceServers.push({
       urls: turnUrls,
@@ -108,47 +124,19 @@ app.get('/api/ice-servers', (req, res) => {
     });
   }
 
-  // Free public TURN servers as last-resort fallback
   const hasTurn = iceServers.some((server) => {
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
     return urls.some((url) => String(url).startsWith('turn:') || String(url).startsWith('turns:'));
   });
 
   if (!hasTurn) {
-    // Metered.ca free TURN relay (more reliable than old OpenRelay)
-    iceServers.push(
-      {
-        urls: 'turn:a.relay.metered.ca:80',
-        username: 'e8dd65b92f4fa3e9bab4e975',
-        credential: '1gLGRGHl1FYxIybN'
-      },
-      {
-        urls: 'turn:a.relay.metered.ca:80?transport=tcp',
-        username: 'e8dd65b92f4fa3e9bab4e975',
-        credential: '1gLGRGHl1FYxIybN'
-      },
-      {
-        urls: 'turn:a.relay.metered.ca:443',
-        username: 'e8dd65b92f4fa3e9bab4e975',
-        credential: '1gLGRGHl1FYxIybN'
-      },
-      {
-        urls: 'turns:a.relay.metered.ca:443?transport=tcp',
-        username: 'e8dd65b92f4fa3e9bab4e975',
-        credential: '1gLGRGHl1FYxIybN'
-      }
-    );
-    console.log('ℹ️  No TURN server configured — using free public relay (Metered.ca).');
-    console.log('   For better performance, set TURN_URLS and TURN_SECRET in .env');
+    console.log('⚠️  No TURN server configured!');
+    console.log('   Video calls between different networks may fail.');
+    console.log('   Get a free TURN server: https://www.metered.ca/stun-turn');
+    console.log('   Then set METERED_API_KEY in your .env file.');
   }
 
-  res.json({
-    iceServers,
-    turnConfigured: iceServers.some((server) => {
-      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-      return urls.some((url) => String(url).startsWith('turn:') || String(url).startsWith('turns:'));
-    })
-  });
+  res.json({ iceServers, turnConfigured: hasTurn });
 });
 
 app.get('/api/rooms', (req, res) => {
