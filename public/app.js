@@ -1201,15 +1201,19 @@ sendImageBtn.addEventListener('click', async () => {
   const originalQuality = originalQualityCheckbox.checked;
   const originalFile = tempImageFile;
   
-  closePreviewModal();
+  const originalBtnContent = sendImageBtn.innerHTML;
+  sendImageBtn.disabled = true;
+  sendImageBtn.innerHTML = 'جاري الإرسال...';
 
   try {
     let base64Data;
     if (originalQuality) {
-      base64Data = await fileToBase64(originalFile);
+      base64Data = previewModalImg.src;
     } else {
       base64Data = await compressImage(originalFile, 1000, 1000, 0.7);
     }
+
+    closePreviewModal();
 
     if (roomKey) {
       try {
@@ -1229,6 +1233,12 @@ sendImageBtn.addEventListener('click', async () => {
   } catch (err) {
     console.error('Failed to send image:', err);
     alert('حدث خطأ أثناء إرسال الصورة.');
+  } finally {
+    sendImageBtn.disabled = false;
+    sendImageBtn.innerHTML = originalBtnContent;
+    if (imagePreviewModal.classList.contains('active')) {
+      closePreviewModal();
+    }
   }
 });
 
