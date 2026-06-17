@@ -81,8 +81,12 @@ function getTurnUrls() {
 app.get('/api/ice-servers', (req, res) => {
   const turnUrls = getTurnUrls();
   const iceServers = [
+    // Multiple STUN servers for reliability
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' }
   ];
 
   // Temporary TURN credentials (preferred)
@@ -105,37 +109,36 @@ app.get('/api/ice-servers', (req, res) => {
   }
 
   // Free public TURN servers as last-resort fallback
-  // These ensure WebRTC works across different networks even without a custom TURN config
   const hasTurn = iceServers.some((server) => {
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
     return urls.some((url) => String(url).startsWith('turn:') || String(url).startsWith('turns:'));
   });
 
   if (!hasTurn) {
-    // OpenRelay free TURN servers (metered.ca public project)
+    // Metered.ca free TURN relay (more reliable than old OpenRelay)
     iceServers.push(
       {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: 'turn:a.relay.metered.ca:80',
+        username: 'e8dd65b92f4fa3e9bab4e975',
+        credential: '1gLGRGHl1FYxIybN'
       },
       {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: 'turn:a.relay.metered.ca:80?transport=tcp',
+        username: 'e8dd65b92f4fa3e9bab4e975',
+        credential: '1gLGRGHl1FYxIybN'
       },
       {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: 'turn:a.relay.metered.ca:443',
+        username: 'e8dd65b92f4fa3e9bab4e975',
+        credential: '1gLGRGHl1FYxIybN'
       },
       {
-        urls: 'turns:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: 'turns:a.relay.metered.ca:443?transport=tcp',
+        username: 'e8dd65b92f4fa3e9bab4e975',
+        credential: '1gLGRGHl1FYxIybN'
       }
     );
-    console.log('ℹ️  No TURN server configured — using free public relay (OpenRelay).');
+    console.log('ℹ️  No TURN server configured — using free public relay (Metered.ca).');
     console.log('   For better performance, set TURN_URLS and TURN_SECRET in .env');
   }
 

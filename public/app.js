@@ -404,9 +404,19 @@ async function loadIceServers() {
     const data = await response.json();
     if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
       rtcConfiguration = { iceServers: data.iceServers };
+      console.log(`[ICE] Loaded ${data.iceServers.length} ICE servers. TURN configured: ${data.turnConfigured}`);
     }
   } catch (error) {
-    console.warn('Using fallback ICE servers:', error);
+    console.warn('[ICE] Using fallback ICE servers:', error);
+    rtcConfiguration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
+      ]
+    };
   } finally {
     iceServersLoaded = true;
   }
@@ -819,6 +829,9 @@ function removeRemoteUser(userId) {
 function getOrCreatePeerConnection(userId, username) {
   if (peerConnections.has(userId)) return peerConnections.get(userId);
 
+  console.log(`[WebRTC] Creating peer connection to ${username} (${userId})`);
+  console.log(`[WebRTC] ICE servers:`, JSON.stringify(rtcConfiguration.iceServers.map(s => s.urls)));
+
   const peerConnection = new RTCPeerConnection(rtcConfiguration);
   const remoteStream = new MediaStream();
   const remoteVideo = createRemoteVideo(userId, username);
@@ -839,27 +852,40 @@ function getOrCreatePeerConnection(userId, username) {
 
   peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
+      console.log(`[ICE] Sending candidate to ${userId}: ${event.candidate.type || 'unknown'} (${event.candidate.protocol})`);
       socket.emit('ice-candidate', { to: userId, candidate: event.candidate });
+    } else {
+      console.log(`[ICE] All candidates gathered for ${userId}`);
     }
   };
 
+  peerConnection.onicegatheringstatechange = () => {
+    console.log(`[ICE] Gathering state [${userId}]: ${peerConnection.iceGatheringState}`);
+  };
+
   peerConnection.ontrack = (event) => {
-    console.log(`[WebRTC] Track received from ${userId}: ${event.track.kind}`);
+    console.log(`[WebRTC] Track received from ${userId}: ${event.track.kind} (readyState: ${event.track.readyState})`);
+    
+    // Add track to remote stream
     if (event.streams && event.streams[0]) {
       event.streams[0].getTracks().forEach((track) => {
         if (!remoteStream.getTrackById(track.id)) {
           remoteStream.addTrack(track);
+          console.log(`[WebRTC] Added ${track.kind} track from stream to ${userId}`);
         }
       });
     } else {
       // Fallback: add track directly (common with TURN relay)
       if (!remoteStream.getTrackById(event.track.id)) {
         remoteStream.addTrack(event.track);
+        console.log(`[WebRTC] Added ${event.track.kind} track (direct) to ${userId}`);
       }
     }
-    // Ensure video element is playing with audio
+
+    // Re-assign srcObject to trigger playback (important for some browsers)
     const videoEl = document.querySelector(`#remote-${userId} video`);
     if (videoEl) {
+      videoEl.srcObject = remoteStream;
       const playPromise = videoEl.play();
       if (playPromise !== undefined) {
         playPromise.then(() => {
@@ -877,28 +903,78 @@ function getOrCreatePeerConnection(userId, username) {
     }
   };
 
+  let iceRetryCount = 0;
+  const MAX_ICE_RETRIES = 3;
+
   peerConnection.oniceconnectionstatechange = () => {
     const state = peerConnection.iceConnectionState;
-    console.log(`ICE state [${userId}]: ${state}`);
-    if (state === 'failed') {
-      // Attempt ICE restart
-      console.log(`Attempting ICE restart for ${userId}`);
+    console.log(`[ICE] Connection state [${userId}]: ${state}`);
+    
+    // Show connection status to user
+    showConnectionStatus(userId, username, state);
+
+    if (state === 'connected' || state === 'completed') {
+      iceRetryCount = 0; // reset on success
+      console.log(`[WebRTC] ✅ Connected to ${username}!`);
+    }
+
+    if (state === 'failed' && iceRetryCount < MAX_ICE_RETRIES) {
+      iceRetryCount++;
+      console.log(`[ICE] Attempting ICE restart for ${userId} (attempt ${iceRetryCount}/${MAX_ICE_RETRIES})`);
       peerConnection.createOffer({ iceRestart: true }).then((offer) => {
         return peerConnection.setLocalDescription(offer);
       }).then(() => {
         socket.emit('offer', { to: userId, offer: peerConnection.localDescription });
-      }).catch((err) => console.error('ICE restart failed:', err));
+      }).catch((err) => console.error('[ICE] Restart failed:', err));
+    } else if (state === 'failed' && iceRetryCount >= MAX_ICE_RETRIES) {
+      console.error(`[ICE] ❌ Connection to ${username} failed after ${MAX_ICE_RETRIES} retries.`);
+      addSystemMessage({
+        message: `⚠️ تعذّر الاتصال بـ ${username}. قد يكون بسبب قيود الشبكة.`,
+        time: new Date().toISOString()
+      });
     }
   };
 
   peerConnection.onconnectionstatechange = () => {
-    if (['failed', 'closed', 'disconnected'].includes(peerConnection.connectionState)) {
+    const state = peerConnection.connectionState;
+    console.log(`[WebRTC] Connection state [${userId}]: ${state}`);
+    
+    if (state === 'failed') {
+      // Only remove after all retries exhausted
+      if (iceRetryCount >= MAX_ICE_RETRIES) {
+        removeRemoteUser(userId);
+      }
+    } else if (state === 'closed') {
       removeRemoteUser(userId);
     }
+    // Don't remove on 'disconnected' — it can recover automatically
   };
 
   peerConnections.set(userId, peerConnection);
   return peerConnection;
+}
+
+function showConnectionStatus(userId, username, state) {
+  const statusMap = {
+    'new': { text: `جاري بدء الاتصال بـ ${username}…`, type: 'info' },
+    'checking': { text: `جاري الاتصال بـ ${username}…`, type: 'info' },
+    'connected': { text: `✅ تم الاتصال بـ ${username}`, type: 'success' },
+    'completed': { text: `✅ تم الاتصال بـ ${username}`, type: 'success' },
+    'disconnected': { text: `⏳ اتصال ${username} مُتقطّع، جاري إعادة المحاولة…`, type: 'warning' },
+    'failed': { text: `❌ فشل الاتصال بـ ${username}`, type: 'error' },
+    'closed': { text: `${username} قطع الاتصال`, type: 'info' }
+  };
+
+  const info = statusMap[state];
+  if (!info) return;
+
+  // Show as system message for important states only
+  if (['connected', 'completed', 'failed'].includes(state)) {
+    addSystemMessage({
+      message: info.text,
+      time: new Date().toISOString()
+    });
+  }
 }
 
 async function addQueuedCandidates(userId) {
