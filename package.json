@@ -19,6 +19,7 @@
   "dependencies": {
     "agora-rtc-react": "^2.5.1",
     "agora-rtc-sdk-ng": "^4.24.4",
+    "dotenv": "^17.4.2",
     "express": "^4.18.3",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
