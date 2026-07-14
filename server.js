@@ -489,6 +489,18 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('typing', ({ roomId, isTyping } = {}) => {
+    if (!socket.data.roomId || socket.data.roomId !== roomId) {
+      return;
+    }
+    socket.to(roomId).emit('typing-state', {
+      userId: socket.id,
+      username: socket.data.username,
+      isTyping: Boolean(isTyping)
+    });
+  });
+
+
   socket.on('offer', ({ to, offer } = {}) => {
     if (isRateLimited(socket, 'signal', SOCKET_LIMITS.signal)) {
       return;

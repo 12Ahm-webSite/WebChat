@@ -53,6 +53,7 @@ const toggleRecordBtn = document.getElementById('toggleRecordBtn');
 const recordDot = document.getElementById('recordDot');
 const leaveRoomBtn = document.getElementById('leaveRoomBtn');
 const joinRoomBtn = document.getElementById('joinRoomBtn');
+const typingIndicator = document.getElementById('typingIndicator');
 
 const imageBtn = document.getElementById('imageBtn');
 const imageFileInput = document.getElementById('imageFileInput');
@@ -72,6 +73,19 @@ const peerConnections = new Map();
 const remoteStreams = new Map();
 const queuedCandidates = new Map();
 const participants = new Map();
+
+// Typing indicator state
+const activeTypers = new Map(); // userId -> username
+let isTyping = false;
+let typingTimeout = null;
+
+// Pinned video state
+let pinnedTileId = null;
+
+// Audio active speaker state
+const audioMonitors = new Map(); // userId -> { stop() }
+let activeSpeakerId = null;
+let lastSpeakerActiveTime = 0;
 
 let localStream = null;
 let currentRoomId = null;
@@ -792,6 +806,27 @@ function createRemoteVideo(userId, username) {
   tile.className = 'video-tile';
   tile.id = `remote-${userId}`;
 
+  // Add click event for pinning
+  tile.addEventListener('click', () => {
+    togglePinVideo(`remote-${userId}`);
+  });
+
+  // Add pin button inside the tile
+  const pinBtn = document.createElement('button');
+  pinBtn.className = 'pin-btn';
+  pinBtn.title = 'تثبيت الفيديو';
+  pinBtn.type = 'button';
+  pinBtn.innerHTML = '📌';
+  pinBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    togglePinVideo(`remote-${userId}`);
+  });
+
+  // Add speaking indicator
+  const speakingInd = document.createElement('div');
+  speakingInd.className = 'speaking-indicator hidden';
+  speakingInd.innerHTML = '🔊';
+
   const video = document.createElement('video');
   video.autoplay = true;
   video.playsInline = true;
@@ -807,13 +842,22 @@ function createRemoteVideo(userId, username) {
   name.textContent = username || userId;
 
   overlay.append(name, status);
-  tile.append(video, overlay);
+  tile.append(pinBtn, speakingInd, video, overlay);
   videoGrid.appendChild(tile);
 
   return video;
 }
 
 function removeRemoteUser(userId) {
+  if (audioMonitors.has(userId)) {
+    audioMonitors.get(userId).stop();
+    audioMonitors.delete(userId);
+  }
+  if (activeSpeakerId === userId) {
+    activeSpeakerId = null;
+    videoGrid.classList.remove('has-active-speaker');
+  }
+
   const peerConnection = peerConnections.get(userId);
   if (peerConnection) peerConnection.close();
 
@@ -865,6 +909,10 @@ function getOrCreatePeerConnection(userId, username) {
 
   peerConnection.ontrack = (event) => {
     console.log(`[WebRTC] Track received from ${userId}: ${event.track.kind} (readyState: ${event.track.readyState})`);
+    
+    if (event.track.kind === 'audio') {
+      setupAudioLevelDetection(userId, remoteStream);
+    }
     
     // Add track to remote stream
     if (event.streams && event.streams[0]) {
@@ -1045,6 +1093,7 @@ async function joinRoom(roomId, username, password) {
 
     await loadIceServers();
     await startLocalMedia();
+    setupAudioLevelDetection('local', localStream);
 
     // Generate E2E key pair
     await generateKeyPair();
@@ -1142,6 +1191,20 @@ async function joinRoom(roomId, username, password) {
 function cleanupRoom() {
   if (isRecording) stopRecording();
 
+  isTyping = false;
+  clearTimeout(typingTimeout);
+  activeTypers.clear();
+  updateTypingIndicator();
+
+  audioMonitors.forEach((m) => m.stop());
+  audioMonitors.clear();
+  activeSpeakerId = null;
+  pinnedTileId = null;
+  if (videoGrid) {
+    videoGrid.classList.remove('has-pinned');
+    videoGrid.classList.remove('has-active-speaker');
+  }
+
   peerConnections.forEach((pc) => pc.close());
   peerConnections.clear();
   remoteStreams.clear();
@@ -1215,6 +1278,11 @@ chatForm.addEventListener('submit', async (event) => {
 
   if (!message || !currentRoomId) return;
 
+  // Clear typing state
+  isTyping = false;
+  clearTimeout(typingTimeout);
+  socket.emit('typing', { roomId: currentRoomId, isTyping: false });
+
   // Encrypt the message if we have a room key
   if (roomKey) {
     try {
@@ -1235,6 +1303,22 @@ chatForm.addEventListener('submit', async (event) => {
 
   messageInput.value = '';
   messageInput.focus();
+});
+
+// Message typing detection
+messageInput.addEventListener('input', () => {
+  if (!currentRoomId) return;
+
+  if (!isTyping) {
+    isTyping = true;
+    socket.emit('typing', { roomId: currentRoomId, isTyping: true });
+  }
+
+  clearTimeout(typingTimeout);
+  typingTimeout = setTimeout(() => {
+    isTyping = false;
+    socket.emit('typing', { roomId: currentRoomId, isTyping: false });
+  }, 3000);
 });
 
 // Image button click trigger
@@ -1404,6 +1488,8 @@ socket.on('user-joined', ({ userId, username, micEnabled: userMicEnabled, camera
 
 socket.on('user-left', ({ userId }) => {
   participants.delete(userId);
+  activeTypers.delete(userId);
+  updateTypingIndicator();
   renderParticipants();
   removeRemoteUser(userId);
   playLeaveSound();
@@ -1451,6 +1537,190 @@ socket.on('public-key', async ({ userId, publicKey }) => {
     console.warn('Key exchange failed:', e);
   }
 });
+
+/* ===== Active Interaction Logic (Typing, Pinning, Speaking) ===== */
+
+function updateTypingIndicator() {
+  if (!typingIndicator) return;
+  if (activeTypers.size === 0) {
+    typingIndicator.classList.add('hidden');
+    typingIndicator.textContent = '';
+    return;
+  }
+
+  const names = Array.from(activeTypers.values());
+  let text = '';
+  if (names.length === 1) {
+    text = `${names[0]} يكتب الآن...`;
+  } else if (names.length === 2) {
+    text = `${names[0]} و${names[1]} يكتبان الآن...`;
+  } else {
+    text = 'عدة أشخاص يكتبون الآن...';
+  }
+
+  typingIndicator.textContent = text;
+  typingIndicator.classList.remove('hidden');
+}
+
+socket.on('typing-state', ({ userId, username, isTyping }) => {
+  if (isTyping) {
+    activeTypers.set(userId, username);
+  } else {
+    activeTypers.delete(userId);
+  }
+  updateTypingIndicator();
+});
+
+function togglePinVideo(tileId) {
+  const tile = document.getElementById(tileId);
+  if (!tile) return;
+
+  const isAlreadyPinned = tile.classList.contains('pinned');
+
+  // Clear pinned class from all video tiles
+  document.querySelectorAll('.video-tile').forEach((t) => {
+    t.classList.remove('pinned');
+  });
+
+  if (isAlreadyPinned) {
+    pinnedTileId = null;
+    videoGrid.classList.remove('has-pinned');
+  } else {
+    pinnedTileId = tileId;
+    tile.classList.add('pinned');
+    videoGrid.classList.add('has-pinned');
+    
+    // Clear auto-pinned active speaker layout (but keep speaking class/indicators)
+    document.querySelectorAll('.video-tile').forEach((t) => {
+      t.classList.remove('active-speaker-large');
+    });
+    videoGrid.classList.remove('has-active-speaker');
+  }
+}
+
+function setupAudioLevelDetection(userId, stream) {
+  if (audioMonitors.has(userId)) {
+    audioMonitors.get(userId).stop();
+  }
+
+  if (!stream || stream.getAudioTracks().length === 0) {
+    return;
+  }
+
+  try {
+    const audioContext = getAudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    
+    let isMonitoring = true;
+    let speakingFrames = 0;
+    let silentFrames = 0;
+
+    const checkVolume = () => {
+      if (!isMonitoring) return;
+
+      analyser.getByteFrequencyData(dataArray);
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        sum += dataArray[i];
+      }
+      const average = sum / bufferLength;
+
+      const isCurrentlySpeaking = average > 12;
+
+      if (isCurrentlySpeaking) {
+        speakingFrames++;
+        silentFrames = 0;
+        if (speakingFrames >= 3) {
+          handleSpeakingState(userId, true);
+        }
+      } else {
+        silentFrames++;
+        if (silentFrames >= 20) { // ~300ms cooldown
+          speakingFrames = 0;
+          handleSpeakingState(userId, false);
+        }
+      }
+
+      requestAnimationFrame(checkVolume);
+    };
+
+    checkVolume();
+
+    audioMonitors.set(userId, {
+      stop: () => {
+        isMonitoring = false;
+        try {
+          source.disconnect();
+          analyser.disconnect();
+        } catch (e) {}
+      }
+    });
+  } catch (err) {
+    console.warn('[Audio] Failed to monitor audio for user:', userId, err);
+  }
+}
+
+function handleSpeakingState(userId, isSpeaking) {
+  const tileId = userId === 'local' ? 'localTile' : `remote-${userId}`;
+  const tile = document.getElementById(tileId);
+  if (!tile) return;
+
+  const speakingIndicator = tile.querySelector('.speaking-indicator');
+
+  if (isSpeaking) {
+    tile.classList.add('speaking');
+    if (speakingIndicator) speakingIndicator.classList.remove('hidden');
+
+    // Auto-pin active speaker logic (if no manual pin exists)
+    if (!pinnedTileId) {
+      if (activeSpeakerId !== userId) {
+        // Clear active speaker from others
+        document.querySelectorAll('.video-tile').forEach((t) => {
+          t.classList.remove('active-speaker-large');
+        });
+        tile.classList.add('active-speaker-large');
+        videoGrid.classList.add('has-active-speaker');
+        activeSpeakerId = userId;
+      }
+      lastSpeakerActiveTime = Date.now();
+    }
+  } else {
+    tile.classList.remove('speaking');
+    if (speakingIndicator) speakingIndicator.classList.add('hidden');
+
+    // If they were the active speaker, clear it after some silence
+    if (activeSpeakerId === userId && !pinnedTileId) {
+      setTimeout(() => {
+        if (activeSpeakerId === userId) {
+          tile.classList.remove('active-speaker-large');
+          videoGrid.classList.remove('has-active-speaker');
+          activeSpeakerId = null;
+        }
+      }, 800);
+    }
+  }
+}
+
+// Add local tile click events for manual pinning
+const localTile = document.getElementById('localTile');
+if (localTile) {
+  localTile.addEventListener('click', () => {
+    togglePinVideo('localTile');
+  });
+  const localPinBtn = localTile.querySelector('.pin-btn');
+  if (localPinBtn) {
+    localPinBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePinVideo('localTile');
+    });
+  }
+}
 
 /* ===== PWA Service Worker ===== */
 if ('serviceWorker' in navigator) {
